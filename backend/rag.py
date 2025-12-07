@@ -48,7 +48,7 @@ class VideoRAG:
                 "Please set it with: export GROQ_API_KEY='your-api-key'"
             )
         self.groq_client = Groq(api_key=groq_api_key)
-        self.groq_model = "llama3-8b-8192"
+        self.groq_model = "llama-3.1-8b-instant"
         
         print("VideoRAG initialized successfully!")
     
@@ -77,10 +77,96 @@ class VideoRAG:
         
         return embedding
     
-    def query_video(self, user_query: str, video_id_filter: Optional[str] = None,
-                   top_k_frames: int = 3, top_k_transcripts: int = 3) -> Dict:
+    def get_context_window(self, results: Dict, video_id: Optional[str] = None, window_size: int = 2) -> str:
         """
-        Query video content and generate answer using RAG.
+        For every 'hit' in the database, fetch the neighbors (chunks before and after).
+        This fixes the issue where we find the question but miss the answer.
+        
+        Args:
+            results: ChromaDB query results containing IDs and documents
+            video_id: Video ID to filter chunks (required for proper windowing)
+            window_size: Number of chunks before and after to include
+        
+        Returns:
+            Expanded context text with neighboring chunks
+        """
+        if not results or not results.get("ids") or len(results["ids"][0]) == 0:
+            return ""
+        
+        expanded_context = []
+        collection = self.database.video_transcripts_collection
+        
+        # Get all chunks for this video to determine valid index range
+        if video_id:
+            all_chunks = collection.get(where={"video_id": video_id})
+            if not all_chunks or not all_chunks.get("ids"):
+                return ""
+            # Find max chunk index for this video
+            max_index = -1
+            for chunk_id in all_chunks["ids"]:
+                if chunk_id.startswith(f"{video_id}_chunk_"):
+                    try:
+                        idx = int(chunk_id.split("_")[-1])
+                        max_index = max(max_index, idx)
+                    except (ValueError, IndexError):
+                        continue
+        else:
+            max_index = 10000  # Fallback if no video_id
+        
+        # Process each match
+        for match_id in results["ids"][0]:
+            # Parse chunk index from ID format: {video_id}_chunk_{index}
+            try:
+                parts = match_id.split("_")
+                if len(parts) >= 3 and parts[-2] == "chunk":
+                    current_idx = int(parts[-1])
+                else:
+                    # Fallback: try to extract number from end
+                    current_idx = int(match_id.split("_")[-1])
+            except (ValueError, IndexError):
+                print(f"Warning: Could not parse chunk index from ID: {match_id}")
+                continue
+            
+            # Calculate neighbor IDs
+            start_idx = max(0, current_idx - window_size)
+            end_idx = min(max_index + 1, current_idx + window_size + 1)
+            
+            # Create list of neighbor IDs to fetch
+            neighbor_ids = [f"{video_id}_chunk_{n}" for n in range(start_idx, end_idx)]
+            
+            # Fetch these neighbors from DB
+            try:
+                neighbors = collection.get(ids=neighbor_ids)
+                
+                if neighbors and neighbors.get("ids") and neighbors.get("documents") and neighbors.get("metadatas"):
+                    # Sort them by ID to ensure they read like a normal paragraph
+                    sorted_data = sorted(
+                        zip(neighbors["ids"], neighbors["documents"], neighbors["metadatas"]),
+                        key=lambda x: int(x[0].split("_")[-1]) if x[0].split("_")[-1].isdigit() else 0
+                    )
+                    
+                    # Join them into a single coherent block of text with timestamps
+                    block_parts = []
+                    for chunk_id, doc, metadata in sorted_data:
+                        # Get timestamp from metadata (use start time)
+                        timestamp_start = metadata.get("timestamp_start", 0.0)
+                        # Format: [Time: 12.5s] text content
+                        block_parts.append(f"[Time: {timestamp_start:.1f}s] {doc}")
+                    
+                    block_text = " ".join(block_parts)
+                    expanded_context.append(block_text)
+            except Exception as e:
+                print(f"Warning: Error fetching neighbors for {match_id}: {e}")
+                continue
+        
+        # Remove duplicates and join
+        unique_contexts = list(set(expanded_context))
+        return "\n\n---\n\n".join(unique_contexts)
+    
+    def query_video(self, user_query: str, video_id_filter: Optional[str] = None,
+                   top_k_frames: int = 3, top_k_transcripts: int = 5) -> Dict:
+        """
+        Query video content and generate answer using RAG with Window Retrieval.
         
         Args:
             user_query: User's question about the video
@@ -118,10 +204,31 @@ class VideoRAG:
             video_id_filter=video_id_filter
         )
         
-        # Step 4: Combine results into context string
-        context = self._build_context(frame_results, transcript_results)
+        # Step 4: Expand context using Window Retrieval
+        print("Expanding context with window retrieval...")
+        context_text = self.get_context_window(
+            transcript_results,
+            video_id=video_id_filter,
+            window_size=2
+        )
         
-        # Step 5: Send context + user query to Llama 3 (placeholder)
+        # Step 5: Build frame context (keep original format for frames)
+        frame_context = ""
+        if frame_results and frame_results.get("ids") and len(frame_results["ids"][0]) > 0:
+            frame_context = "=== Relevant Video Frame Descriptions ===\n"
+            frame_ids = frame_results["ids"][0]
+            frame_metadatas = frame_results["metadatas"][0]
+            for i, (frame_id, metadata) in enumerate(zip(frame_ids, frame_metadatas), 1):
+                timestamp = metadata.get("timestamp", 0.0)
+                frame_context += f"Frame {i}: At {timestamp:.2f} seconds\n"
+        
+        # Combine contexts
+        if frame_context:
+            context = f"{frame_context}\n\n=== Transcript Context ===\n{context_text}"
+        else:
+            context = context_text if context_text else "No relevant content found."
+        
+        # Step 6: Generate answer with improved prompt
         print("Generating answer with LLM...")
         answer = self._generate_answer(user_query, context)
         
@@ -135,59 +242,9 @@ class VideoRAG:
         print("Query processing completed!")
         return result
     
-    def _build_context(self, frame_results: Dict, transcript_results: Dict) -> str:
-        """
-        Build context string from retrieved frames and transcripts.
-        
-        Args:
-            frame_results: ChromaDB query results for frames
-            transcript_results: ChromaDB query results for transcripts
-        
-        Returns:
-            Formatted context string
-        """
-        context_parts = []
-        
-        # Add frame information
-        if frame_results and frame_results.get("ids") and len(frame_results["ids"][0]) > 0:
-            context_parts.append("=== Relevant Video Frame Descriptions ===")
-            frame_ids = frame_results["ids"][0]
-            frame_metadatas = frame_results["metadatas"][0]
-            frame_distances = frame_results.get("distances", [[]])[0] if "distances" in frame_results else [0.0] * len(frame_ids)
-            
-            for i, (frame_id, metadata, distance) in enumerate(zip(frame_ids, frame_metadatas, frame_distances), 1):
-                timestamp = metadata.get("timestamp", 0.0)
-                video_id = metadata.get("video_id", "unknown")
-                context_parts.append(
-                    f"Frame {i}: At {timestamp:.2f} seconds (video: {video_id}, "
-                    f"similarity: {1-distance:.3f})"
-                )
-        
-        # Add transcript information
-        if transcript_results and transcript_results.get("ids") and len(transcript_results["ids"][0]) > 0:
-            context_parts.append("\n=== Relevant Transcript Segments ===")
-            transcript_ids = transcript_results["ids"][0]
-            transcript_documents = transcript_results["documents"][0]
-            transcript_metadatas = transcript_results["metadatas"][0]
-            transcript_distances = transcript_results.get("distances", [[]])[0] if "distances" in transcript_results else [0.0] * len(transcript_ids)
-            
-            for i, (transcript_id, document, metadata, distance) in enumerate(
-                zip(transcript_ids, transcript_documents, transcript_metadatas, transcript_distances), 1
-            ):
-                start_time = metadata.get("timestamp_start", 0.0)
-                end_time = metadata.get("timestamp_end", 0.0)
-                video_id = metadata.get("video_id", "unknown")
-                context_parts.append(
-                    f"Segment {i} ({start_time:.2f}s - {end_time:.2f}s, video: {video_id}, "
-                    f"similarity: {1-distance:.3f}):\n{document}"
-                )
-        
-        context = "\n".join(context_parts) if context_parts else "No relevant content found."
-        return context
-    
     def _generate_answer(self, user_query: str, context: str) -> str:
         """
-        Generate answer using Llama 3 via Groq API.
+        Generate answer using Llama 3 via Groq API with improved system prompt.
         
         Args:
             user_query: User's question
@@ -196,29 +253,31 @@ class VideoRAG:
         Returns:
             Generated answer string
         """
-        # System prompt
-        system_prompt = (
-            "You are a helpful video assistant. Answer the user question based ONLY on the "
-            "provided video context. If the answer is not in the context, say you don't know."
-        )
+        # Improved system prompt for better answer extraction
+        system_prompt = """You are a video analyst. Answer the user question.
+
+CRITICAL: When you make a claim, you MUST cite the timestamp from the context in the format [[12.5]]. 
+Do not say "Timestamp not available" if the context has time markers like [Time: 12.5s].
+
+INSTRUCTIONS:
+1. The segments may be out of order or contain the speaker asking rhetorical questions. 
+2. Look for the *answer* in the text, not just the question.
+3. If the text mentions "X is..." or "X refers to...", that is your definition.
+4. Always cite timestamps using [[seconds]] format when referencing specific content.
+5. If the answer is not in the context, say you don't know."""
         
         # Construct user prompt with context
-        user_prompt = f"""Video Context:
-{context}
-
-User Question: {user_query}
-
-Please provide a helpful answer based on the video context above."""
+        user_prompt = f"Context:\n{context}\n\nQuestion: {user_query}"
         
         try:
-            # Call Groq API
+            # Call Groq API with lower temperature for more factual answers
             response = self.groq_client.chat.completions.create(
                 model=self.groq_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.7,
+                temperature=0.3,  # Lower temperature for more factual answers
                 max_tokens=1024
             )
             
