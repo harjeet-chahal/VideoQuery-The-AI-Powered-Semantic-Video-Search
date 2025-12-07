@@ -174,8 +174,10 @@ class VideoDatabase:
         metadatas = []
         
         for i, segment in enumerate(transcript):
-            # Generate unique ID for this transcript segment
-            segment_id = f"{video_id}_transcript_{i}_{uuid.uuid4().hex[:8]}"
+            # Use sequential chunk IDs: chunk_0, chunk_1, chunk_2, etc.
+            # Format: {video_id}_chunk_{i} to ensure uniqueness across videos
+            # The window retrieval will parse this to extract the index
+            segment_id = f"{video_id}_chunk_{i}"
             ids.append(segment_id)
             
             # Store the text (ChromaDB will auto-embed this)
@@ -186,7 +188,8 @@ class VideoDatabase:
                 "timestamp_start": float(segment.get("start", 0.0)),
                 "timestamp_end": float(segment.get("end", 0.0)),
                 "video_id": video_id,
-                "segment_index": i
+                "segment_index": i,
+                "chunk_index": i  # Store index for easy retrieval
             })
         
         # Add to collection

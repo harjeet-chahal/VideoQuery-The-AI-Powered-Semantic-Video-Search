@@ -14,6 +14,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict
+from dotenv import load_dotenv
 import os
 import uuid
 import shutil
@@ -23,6 +24,7 @@ from backend.database import VideoDatabase, initialize_database
 from backend.rag import VideoRAG
 
 app = FastAPI(title="VideoQuery API")
+load_dotenv(dotenv_path=project_root / ".env")
 
 # Enable CORS for Streamlit frontend
 app.add_middleware(
@@ -182,6 +184,103 @@ def get_frame_image(frame_path: str):
         return FileResponse(frame_path)
     else:
         raise HTTPException(status_code=404, detail="Frame not found")
+
+
+@app.get("/video/{video_id}/transcript")
+def get_video_transcript(video_id: str):
+    """
+    Get all transcript segments for a specific video.
+    
+    Returns:
+        Dictionary with transcript segments
+    """
+    try:
+        db = get_database()
+        transcripts = db.get_video_transcripts(video_id)
+        return transcripts
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving transcript: {str(e)}")
+
+
+@app.get("/summary/{video_id}")
+def get_video_summary(video_id: str):
+    """
+    Generate a summary of the video by retrieving all transcripts and summarizing with Groq.
+    
+    Returns:
+        Dictionary with summary text
+    """
+    try:
+        # Get all transcript segments for the video
+        db = get_database()
+        transcripts = db.get_video_transcripts(video_id)
+        
+        if not transcripts or not transcripts.get("documents"):
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No transcript found for video_id: {video_id}"
+            )
+        
+        # Stitch together all transcript segments
+        documents = transcripts.get("documents", [])
+        metadatas = transcripts.get("metadatas", [])
+        
+        # Sort by timestamp_start to maintain chronological order
+        transcript_parts = []
+        for doc, metadata in zip(documents, metadatas):
+            start_time = metadata.get("timestamp_start", 0.0)
+            end_time = metadata.get("timestamp_end", 0.0)
+            transcript_parts.append((start_time, end_time, doc))
+        
+        # Sort by start time
+        transcript_parts.sort(key=lambda x: x[0])
+        
+        # Combine all transcript segments
+        full_transcript = "\n".join([doc for _, _, doc in transcript_parts])
+        
+        # Generate summary using Groq
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="GROQ_API_KEY environment variable is not set"
+            )
+        
+        from groq import Groq
+        groq_client = Groq(api_key=groq_api_key)
+        
+        system_prompt = (
+            "You are a helpful video assistant. Summarize the key takeaways from the video transcript."
+        )
+        
+        user_prompt = f"""Video Transcript:
+{full_transcript}
+
+Please provide a concise summary of the key takeaways from this video."""
+        
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1024
+        )
+        
+        summary = response.choices[0].message.content.strip()
+        
+        return {
+            "video_id": video_id,
+            "summary": summary,
+            "transcript_length": len(full_transcript),
+            "num_segments": len(transcript_parts)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
 
 
 if __name__ == "__main__":

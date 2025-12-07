@@ -11,4 +11,5 @@ openai-whisper
 numpy
 requests
 groq
+python-dotenv
 
