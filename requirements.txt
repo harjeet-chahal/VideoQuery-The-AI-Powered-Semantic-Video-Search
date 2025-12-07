@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+streamlit
+chromadb
+torch
+transformers
+ffmpeg-python
+pillow
+python-multipart
+openai-whisper
+numpy
+requests
+

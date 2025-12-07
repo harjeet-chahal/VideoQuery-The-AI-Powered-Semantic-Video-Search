@@ -1,0 +1,33 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Python / build
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+
+# Environment variables (do NOT commit secrets)
+.env
+.env.local
+
+# Project generated data
+data/uploads/
+data/processed/
+data/chromadb/
+
+# Streamlit / tooling
+.streamlit/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE configs (optional)
+.vscode/
+.idea/
