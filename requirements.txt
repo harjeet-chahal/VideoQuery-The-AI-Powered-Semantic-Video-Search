@@ -10,4 +10,5 @@ python-multipart
 openai-whisper
 numpy
 requests
+groq
 

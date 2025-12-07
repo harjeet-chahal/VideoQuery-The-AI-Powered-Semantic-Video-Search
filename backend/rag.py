@@ -11,9 +11,11 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from typing import Dict, List, Optional
+import os
 import torch
 import numpy as np
 from transformers import CLIPProcessor, CLIPModel
+from groq import Groq
 from backend.database import VideoDatabase
 
 
@@ -37,6 +39,16 @@ class VideoRAG:
         print(f"Loading CLIP model for text encoding on {self.device}...")
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
         self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        
+        # Initialize Groq client
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise ValueError(
+                "GROQ_API_KEY environment variable is not set. "
+                "Please set it with: export GROQ_API_KEY='your-api-key'"
+            )
+        self.groq_client = Groq(api_key=groq_api_key)
+        self.groq_model = "llama3-8b-8192"
         
         print("VideoRAG initialized successfully!")
     
@@ -138,7 +150,7 @@ class VideoRAG:
         
         # Add frame information
         if frame_results and frame_results.get("ids") and len(frame_results["ids"][0]) > 0:
-            context_parts.append("=== Relevant Video Frames ===")
+            context_parts.append("=== Relevant Video Frame Descriptions ===")
             frame_ids = frame_results["ids"][0]
             frame_metadatas = frame_results["metadatas"][0]
             frame_distances = frame_results.get("distances", [[]])[0] if "distances" in frame_results else [0.0] * len(frame_ids)
@@ -175,49 +187,49 @@ class VideoRAG:
     
     def _generate_answer(self, user_query: str, context: str) -> str:
         """
-        Generate answer using Llama 3 (placeholder implementation).
+        Generate answer using Llama 3 via Groq API.
         
         Args:
             user_query: User's question
-            context: Retrieved context from video
+            context: Retrieved context from video (includes transcript segments and frame descriptions)
         
         Returns:
             Generated answer string
         """
-        # Placeholder for Llama 3 API call
-        # This will be replaced with actual API calls to Groq or Ollama
+        # System prompt
+        system_prompt = (
+            "You are a helpful video assistant. Answer the user question based ONLY on the "
+            "provided video context. If the answer is not in the context, say you don't know."
+        )
         
-        prompt = f"""Based on the following context from a video, please answer the user's question.
-
-Context:
+        # Construct user prompt with context
+        user_prompt = f"""Video Context:
 {context}
 
 User Question: {user_query}
 
-Answer:"""
+Please provide a helpful answer based on the video context above."""
         
-        # TODO: Replace with actual Llama 3 API call
-        # Example for Groq:
-        # from groq import Groq
-        # client = Groq(api_key="your-api-key")
-        # response = client.chat.completions.create(
-        #     model="llama-3-8b-8192",
-        #     messages=[{"role": "user", "content": prompt}]
-        # )
-        # return response.choices[0].message.content
-        
-        # Example for Ollama:
-        # import requests
-        # response = requests.post(
-        #     "http://localhost:11434/api/generate",
-        #     json={"model": "llama3", "prompt": prompt}
-        # )
-        # return response.json()["response"]
-        
-        # Placeholder response
-        answer = f"[PLACEHOLDER] Based on the video content, here's what I found:\n\n{context}\n\nThis is a placeholder response. Please implement the Llama 3 API integration."
-        
-        return answer
+        try:
+            # Call Groq API
+            response = self.groq_client.chat.completions.create(
+                model=self.groq_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1024
+            )
+            
+            # Extract answer from response
+            answer = response.choices[0].message.content.strip()
+            return answer
+            
+        except Exception as e:
+            error_msg = f"Error calling Groq API: {str(e)}"
+            print(error_msg)
+            raise Exception(error_msg) from e
 
 
 def query_video(user_query: str, database: VideoDatabase, 
