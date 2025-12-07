@@ -53,8 +53,8 @@ def extract_timestamp_citations(text: str) -> list:
     Returns:
         List of timestamp values in seconds (float)
     """
-    # Pattern for [[12.5]] or [[24]] format
-    pattern = r'\[\[(\d+\.?\d*)\]\]'
+    # Pattern for [[12.5]] or [[24]] format - captures float numbers cleanly
+    pattern = r"\[\[(\d+(?:\.\d+)?)\]\]"
     matches = re.findall(pattern, text)
     # Convert to float and return
     timestamps = [float(match) for match in matches]

@@ -254,16 +254,18 @@ class VideoRAG:
             Generated answer string
         """
         # Improved system prompt for better answer extraction
-        system_prompt = """You are a video analyst. Answer the user question.
+        system_prompt = """You are a video analyst. Answer the user's question based on the transcript segments.
 
-CRITICAL: When you make a claim, you MUST cite the timestamp from the context in the format [[12.5]]. 
-Do not say "Timestamp not available" if the context has time markers like [Time: 12.5s].
+CITATION RULE: You MUST cite the timestamp for every claim using EXACTLY this format: [[123]] (just the seconds number, no 's', no 'Time:', double brackets).
+
+Example: Correct: "LangChain uses agents [[341.9]]."
+Incorrect: "LangChain uses agents [Time: 341.9s]."
 
 INSTRUCTIONS:
 1. The segments may be out of order or contain the speaker asking rhetorical questions. 
 2. Look for the *answer* in the text, not just the question.
 3. If the text mentions "X is..." or "X refers to...", that is your definition.
-4. Always cite timestamps using [[seconds]] format when referencing specific content.
+4. Every claim you make MUST include a timestamp citation in [[seconds]] format.
 5. If the answer is not in the context, say you don't know."""
         
         # Construct user prompt with context
